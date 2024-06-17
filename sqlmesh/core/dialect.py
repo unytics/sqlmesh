@@ -708,6 +708,7 @@ def parse(
     default_dialect: t.Optional[str] = None,
     match_dialect: bool = True,
     into: t.Optional[exp.IntoType] = None,
+    tokens: t.Optional[t.List[Token]] = None,
 ) -> t.List[exp.Expression]:
     """Parse a sql string.
 
@@ -724,7 +725,7 @@ def parse(
     match = match_dialect and DIALECT_PATTERN.search(sql[:MAX_MODEL_DEFINITION_SIZE])
     dialect = Dialect.get_or_raise(match.group(2) if match else default_dialect)
 
-    tokens = dialect.tokenizer.tokenize(sql)
+    tokens = tokens or dialect.tokenizer.tokenize(sql)
     chunks: t.List[t.Tuple[t.List[Token], ChunkType]] = [([], ChunkType.SQL)]
     total = len(tokens)
 
