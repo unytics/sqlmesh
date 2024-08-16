@@ -114,6 +114,7 @@ class BigQueryEngineAdapter(InsertOverwriteWithMergeMixin):
         columns_to_types: t.Dict[str, exp.DataType],
         batch_size: int,
         target_table: TableName,
+        **kwargs: t.Any,
     ) -> t.List[SourceQuery]:
         temp_bq_table = self.__get_temp_bq_table(
             self._get_temp_table(target_table or "pandas"), columns_to_types
@@ -445,6 +446,7 @@ class BigQueryEngineAdapter(InsertOverwriteWithMergeMixin):
         table_name: TableName,
         column_comments: t.Dict[str, str],
         table_kind: str = "TABLE",
+        **kwargs: t.Any,
     ) -> None:
         table = self._get_table(table_name)
 
@@ -493,7 +495,6 @@ class BigQueryEngineAdapter(InsertOverwriteWithMergeMixin):
         columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
         table_description: t.Optional[str] = None,
         table_kind: t.Optional[str] = None,
-        primary_key: t.Optional[t.Tuple[str, ...] | t.List[exp.Expression]] = None,
         ordered_by: t.Optional[t.List[str]] = None,
     ) -> t.Optional[exp.Properties]:
         properties: t.List[exp.Expression] = []
@@ -573,7 +574,7 @@ class BigQueryEngineAdapter(InsertOverwriteWithMergeMixin):
         self,
         view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
         table_description: t.Optional[str] = None,
-        **kwargs: t.Any
+        **kwargs: t.Any,
     ) -> t.Optional[exp.Properties]:
         """Creates a SQLGlot table properties expression for view"""
         properties: t.List[exp.Expression] = []
@@ -592,7 +593,7 @@ class BigQueryEngineAdapter(InsertOverwriteWithMergeMixin):
         return None
 
     def _build_create_comment_table_exp(
-        self, table: exp.Table, table_comment: str, table_kind: str
+        self, table: exp.Table, table_comment: str, table_kind: str, **kwargs: t.Any
     ) -> exp.Comment | str:
         table_sql = table.sql(dialect=self.dialect, identify=True)
 
@@ -602,7 +603,12 @@ class BigQueryEngineAdapter(InsertOverwriteWithMergeMixin):
         return f"ALTER {table_kind} {table_sql} SET OPTIONS(description = {comment_sql})"
 
     def _build_create_comment_column_exp(
-        self, table: exp.Table, column_name: str, column_comment: str, table_kind: str = "TABLE"
+        self,
+        table: exp.Table,
+        column_name: str,
+        column_comment: str,
+        table_kind: str = "TABLE",
+        **kwargs: t.Any,
     ) -> exp.Comment | str:
         table_sql = table.sql(dialect=self.dialect, identify=True)
         column_sql = exp.column(column_name).sql(dialect=self.dialect, identify=True)
@@ -616,7 +622,8 @@ class BigQueryEngineAdapter(InsertOverwriteWithMergeMixin):
         self,
         table_name: str,
         columns_to_types: t.Dict[str, exp.DataType],
-        primary_key: t.Optional[t.Tuple[str, ...] | t.List[exp.Expression]] = None,
+        primary_key: t.Optional[t.Tuple[str, ...]] = None,
+        **kwargs: t.Any,
     ) -> None:
         self.create_table(
             table_name,
