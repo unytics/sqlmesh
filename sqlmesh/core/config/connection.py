@@ -1362,6 +1362,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
     password: t.Optional[str] = None
     port: t.Optional[int] = None
     cluster: t.Optional[str] = None
+    auto_order_by: bool = False
 
     concurrent_tasks: int = 1
     register_comments: bool = True
@@ -1391,7 +1392,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
 
     @property
     def _extra_engine_config(self) -> t.Dict[str, t.Any]:
-        return {k: v for k, v in self.dict().items() if k == "default_cluster"}
+        return {k: v for k, v in self.dict().items() if k in ("auto_order_by", "cluster")}
 
 
 CONNECTION_CONFIG_TO_TYPE = {
