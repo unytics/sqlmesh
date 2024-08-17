@@ -1386,7 +1386,7 @@ class ClickhouseConnectionConfig(ConnectionConfig):
 
     @property
     def _connection_factory(self) -> t.Callable:
-        from clickhouse_connect.dbapi import connect
+        from clickhouse_connect.dbapi import connect  # type: ignore
 
         return connect
 
