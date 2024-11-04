@@ -581,7 +581,7 @@ def test_audit_failure_notifications(
     notify_mock = mocker.Mock()
     mocker.patch("sqlmesh.core.notification_target.NotificationTargetManager.notify", notify_mock)
 
-    audit = next(iter(waiter_names.audits))
+    audit = next(iter(waiter_names.model.audits))
 
     def _evaluate():
         scheduler.evaluate(

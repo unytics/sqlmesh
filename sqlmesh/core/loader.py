@@ -14,7 +14,7 @@ from sqlglot.errors import SchemaError, SqlglotError
 from sqlglot.schema import MappingSchema
 
 from sqlmesh.core import constants as c
-from sqlmesh.core.audit import Audit, ModelAudit, load_multiple_audits
+from sqlmesh.core.audit import Audit, ModelAudit, StandaloneAudit, load_multiple_audits
 from sqlmesh.core.dialect import parse
 from sqlmesh.core.macros import MacroRegistry, macro
 from sqlmesh.core.metric import Metric, MetricMeta, expand_metrics, load_metric_ddl
@@ -49,7 +49,8 @@ class LoadedProject:
     macros: MacroRegistry
     jinja_macros: JinjaMacroRegistry
     models: UniqueKeyDict[str, Model]
-    audits: UniqueKeyDict[str, Audit]
+    standalone_audits: UniqueKeyDict[str, StandaloneAudit]
+    audits: UniqueKeyDict[str, ModelAudit]
     metrics: UniqueKeyDict[str, Metric]
     dag: DAG[str]
 
@@ -93,21 +94,24 @@ class Loader(abc.ABC):
         self._config_mtimes = {path: max(mtimes) for path, mtimes in config_mtimes.items()}
 
         macros, jinja_macros = self._load_scripts()
-        audits = self._load_audits(macros=macros, jinja_macros=jinja_macros)
+        audits: UniqueKeyDict[str, ModelAudit] = UniqueKeyDict("audits")
+        standalone_audits: UniqueKeyDict[str, StandaloneAudit] = UniqueKeyDict("standalone_audits")
+
+        for name, audit in self._load_audits(macros=macros, jinja_macros=jinja_macros).items():
+            if isinstance(audit, ModelAudit):
+                audits[name] = audit
+            else:
+                standalone_audits[name] = audit
+
         models = self._load_models(
-            macros, jinja_macros, context.gateway or context.config.default_gateway, audits or None
+            macros, jinja_macros, context.gateway or context.config.default_gateway, audits
         )
 
         for model in models.values():
             self._add_model_to_dag(model)
 
         if update_schemas:
-            update_model_schemas(
-                self._dag,
-                models=models,
-                audits={k: v for k, v in audits.items() if isinstance(v, ModelAudit)},
-                context_path=self._context.path,
-            )
+            update_model_schemas(self._dag, models=models, context_path=self._context.path)
             for model in models.values():
                 # The model definition can be validated correctly only after the schema is set.
                 model.validate_definition()
@@ -119,6 +123,7 @@ class Loader(abc.ABC):
             jinja_macros=jinja_macros,
             models=models,
             audits=audits,
+            standalone_audits=standalone_audits,
             metrics=expand_metrics(metrics),
             dag=self._dag,
         )
@@ -157,7 +162,7 @@ class Loader(abc.ABC):
         macros: MacroRegistry,
         jinja_macros: JinjaMacroRegistry,
         gateway: t.Optional[str],
-        audits: t.Optional[t.Dict[str, Audit]],
+        audits: UniqueKeyDict[str, ModelAudit],
     ) -> UniqueKeyDict[str, Model]:
         """Loads all models."""
 
@@ -307,7 +312,7 @@ class SqlMeshLoader(Loader):
         macros: MacroRegistry,
         jinja_macros: JinjaMacroRegistry,
         gateway: t.Optional[str],
-        audits: t.Optional[t.Dict[str, Audit]] = None,
+        audits: UniqueKeyDict[str, ModelAudit],
     ) -> UniqueKeyDict[str, Model]:
         """
         Loads all of the models within the model directory with their associated
@@ -315,7 +320,7 @@ class SqlMeshLoader(Loader):
         """
         models = self._load_sql_models(macros, jinja_macros, audits)
         models.update(self._load_external_models(gateway))
-        models.update(self._load_python_models(macros, jinja_macros))
+        models.update(self._load_python_models(macros, jinja_macros, audits))
 
         return models
 
@@ -323,7 +328,7 @@ class SqlMeshLoader(Loader):
         self,
         macros: MacroRegistry,
         jinja_macros: JinjaMacroRegistry,
-        audits: t.Optional[t.Dict[str, Audit]] = None,
+        audits: UniqueKeyDict[str, ModelAudit],
     ) -> UniqueKeyDict[str, Model]:
         """Loads the sql models into a Dict"""
         models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
@@ -381,7 +386,10 @@ class SqlMeshLoader(Loader):
         return models
 
     def _load_python_models(
-        self, macros: MacroRegistry, jinja_macros: JinjaMacroRegistry
+        self,
+        macros: MacroRegistry,
+        jinja_macros: JinjaMacroRegistry,
+        audits: UniqueKeyDict[str, ModelAudit],
     ) -> UniqueKeyDict[str, Model]:
         """Loads the python models into a Dict"""
         models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
@@ -417,6 +425,7 @@ class SqlMeshLoader(Loader):
                             default_catalog=self._context.default_catalog,
                             variables=variables,
                             infer_names=config.model_naming.infer_names,
+                            audits=audits,
                         )
                         if model.enabled:
                             models[model.fqn] = model
@@ -558,7 +567,6 @@ class SqlMeshLoader(Loader):
 def update_model_schemas(
     dag: DAG[str],
     models: UniqueKeyDict[str, Model],
-    audits: t.Dict[str, ModelAudit],
     context_path: Path,
 ) -> None:
     schema = MappingSchema(normalize=False)
@@ -567,7 +575,7 @@ def update_model_schemas(
     if c.MAX_FORK_WORKERS == 1:
         _update_model_schemas_sequential(dag, models, schema, optimized_query_cache)
     else:
-        _update_model_schemas_parallel(dag, models, audits, schema, optimized_query_cache)
+        _update_model_schemas_parallel(dag, models, schema, optimized_query_cache)
 
 
 def _update_schema_with_model(schema: MappingSchema, model: Model) -> None:
@@ -604,7 +612,6 @@ def _update_model_schemas_sequential(
 def _update_model_schemas_parallel(
     dag: DAG[str],
     models: UniqueKeyDict[str, Model],
-    audits: t.Dict[str, ModelAudit],
     schema: MappingSchema,
     optimized_query_cache: OptimizedQueryCache,
 ) -> None:
@@ -637,7 +644,7 @@ def _update_model_schemas_parallel(
                     )
                 )
 
-    with optimized_query_cache_pool(optimized_query_cache, audits) as executor:
+    with optimized_query_cache_pool(optimized_query_cache) as executor:
         process_models()
 
         while futures:

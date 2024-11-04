@@ -453,12 +453,7 @@ class GenericContext(BaseContext, t.Generic[C]):
             }
         )
 
-        update_model_schemas(
-            self.dag,
-            models=self._models,
-            audits=self._audits,
-            context_path=self.path,
-        )
+        update_model_schemas(self.dag, models=self._models, context_path=self.path)
 
         if model.dialect:
             self._all_dialects.add(model.dialect)
@@ -552,12 +547,8 @@ class GenericContext(BaseContext, t.Generic[C]):
             self._macros.update(project.macros)
             self._models.update(project.models)
             self._metrics.update(project.metrics)
-
-            for name, audit in project.audits.items():
-                if isinstance(audit, StandaloneAudit):
-                    self._standalone_audits[name] = audit
-                else:
-                    self._audits[name] = audit
+            self._audits.update(project.audits)
+            self._standalone_audits.update(project.standalone_audits)
 
         self.dag = DAG({k: v for project in projects for k, v in project.dag.graph.items()})
 
@@ -1989,15 +1980,6 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         local_nodes = {**(models_override or self._models), **self._standalone_audits}
         nodes = local_nodes.copy()
-        audits = self._audits.copy()
-
-        for name, snapshot in remote_snapshots.items():
-            if name not in nodes and snapshot.node.project not in projects:
-                nodes[name] = snapshot.node
-                if snapshot.is_model:
-                    for audit in snapshot.audits:
-                        if name not in audits:
-                            audits[name] = audit
 
         def _nodes_to_snapshots(nodes: t.Dict[str, Node]) -> t.Dict[str, Snapshot]:
             snapshots: t.Dict[str, Snapshot] = {}
@@ -2013,7 +1995,6 @@ class GenericContext(BaseContext, t.Generic[C]):
                 snapshot = Snapshot.from_node(
                     node,
                     nodes=nodes,
-                    audits=audits,
                     cache=fingerprint_cache,
                     ttl=ttl,
                     config=self.config_for_node(node),
@@ -2098,7 +2079,6 @@ class GenericContext(BaseContext, t.Generic[C]):
         return Selector(
             self.state_reader,
             models=models or self._models,
-            audits=self._audits,
             context_path=self.path,
             dag=dag,
             default_catalog=self.default_catalog,

@@ -345,7 +345,8 @@ class StandaloneAudit(_Node, AuditMixin):
         # StandaloneAudits do not have a data hash
         return hash_data("")
 
-    def metadata_hash(self, audits: t.Dict[str, ModelAudit]) -> str:
+    @property
+    def metadata_hash(self) -> str:
         """
         Computes the metadata hash for the node.
 

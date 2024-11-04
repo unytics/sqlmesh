@@ -36,7 +36,7 @@ from sqlmesh.utils.date import TimeLike, make_inclusive, to_datetime, to_time_co
 from sqlmesh.utils.errors import ConfigError, SQLMeshError, raise_config_error
 from sqlmesh.utils.hashing import hash_data
 from sqlmesh.utils.jinja import JinjaMacroRegistry, extract_macro_references_and_variables
-from sqlmesh.utils.pydantic import PRIVATE_FIELDS, field_validator, field_validator_v1_args
+from sqlmesh.utils.pydantic import PRIVATE_FIELDS
 from sqlmesh.utils.metaprogramming import (
     Executable,
     build_env,
@@ -48,7 +48,7 @@ from sqlmesh.utils.metaprogramming import (
 if t.TYPE_CHECKING:
     from sqlglot.dialects.dialect import DialectType
     from sqlmesh.core._typing import TableName
-    from sqlmesh.core.audit import ModelAudit, Audit
+    from sqlmesh.core.audit import ModelAudit
     from sqlmesh.core.context import ExecutionContext
     from sqlmesh.core.engine_adapter import EngineAdapter
     from sqlmesh.core.engine_adapter._typing import QueryOrDF
@@ -122,6 +122,7 @@ class _Model(ModelMeta, frozen=True):
 
     python_env_: t.Optional[t.Dict[str, Executable]] = Field(default=None, alias="python_env")
     jinja_macros: JinjaMacroRegistry = JinjaMacroRegistry()
+    audit_definitions: t.Dict[str, ModelAudit] = {}
     mapping_schema: t.Dict[str, t.Any] = {}
     extract_dependencies_from_query: bool = True
 
@@ -536,44 +537,6 @@ class _Model(ModelMeta, frozen=True):
             )
         return query
 
-    def referenced_audits(
-        self,
-        audits: t.Dict[str, ModelAudit],
-        default_audits: t.List[AuditReference] = [],
-    ) -> t.List[ModelAudit]:
-        """Returns audits referenced in this model.
-
-        Args:
-            audits: Available audits by name.
-        """
-        from sqlmesh.core.audit import BUILT_IN_AUDITS
-
-        referenced_audits = []
-
-        for audit_name, audit_args in self.audits + default_audits:
-            if audit_name in self.inline_audits:
-                referenced_audits.append(self.inline_audits[audit_name])
-            elif audit_name in audits:
-                referenced_audits.append(audits[audit_name])
-            else:
-                audit = BUILT_IN_AUDITS.get(audit_name)
-                if not audit:
-                    raise_config_error(
-                        f"Unknown audit '{audit_name}' referenced in model '{self.name}'",
-                        self._path,
-                    )
-
-                # Builtin audits are generally not included in order to reduce fingerprint size,
-                # but those that override `blocking` need to be included because otherwise doing
-                # `audit.blocking` will always return the builtin audit's default value
-                blocking = audit_args.get("blocking")
-                if blocking:
-                    referenced_audits.append(
-                        audit.copy(update={"blocking": blocking == exp.true()})  # type: ignore
-                    )
-
-        return referenced_audits
-
     def text_diff(self, other: Node) -> str:
         """Produce a text diff against another node.
 
@@ -864,18 +827,14 @@ class _Model(ModelMeta, frozen=True):
 
         return data  # type: ignore
 
-    def metadata_hash(self, audits: t.Dict[str, ModelAudit]) -> str:
+    @property
+    def metadata_hash(self) -> str:
         """
         Computes the metadata hash for the node.
-
-        Args:
-            audits: Available audits by name.
 
         Returns:
             The metadata hash for the node.
         """
-        from sqlmesh.core.audit import BUILT_IN_AUDITS
-
         if self._metadata_hash is None:
             metadata = [
                 self.dialect,
@@ -897,33 +856,33 @@ class _Model(ModelMeta, frozen=True):
                 gen(self.session_properties_) if self.session_properties_ else None,
             ]
 
-            for audit_name, audit_args in sorted(self.audits, key=lambda a: a[0]):
-                metadata.append(audit_name)
-                audit = None
-                if audit_name in BUILT_IN_AUDITS:
-                    for arg_name, arg_value in audit_args.items():
-                        metadata.append(arg_name)
-                        metadata.append(gen(arg_value))
-                elif audit_name in self.inline_audits:
-                    audit = self.inline_audits[audit_name]
-                elif audit_name in audits:
-                    audit = audits[audit_name]
-                else:
-                    raise SQLMeshError(f"Unexpected audit name '{audit_name}'.")
+            # for audit_name, audit_args in sorted(self.audits, key=lambda a: a[0]):
+            #    metadata.append(audit_name)
+            #    audit = None
+            #    if audit_name in BUILT_IN_AUDITS:
+            #        for arg_name, arg_value in audit_args.items():
+            #            metadata.append(arg_name)
+            #            metadata.append(gen(arg_value))
+            #    elif audit_name in self.inline_audits:
+            #        audit = self.inline_audits[audit_name]
+            #    elif audit_name in audits:
+            #        audit = audits[audit_name]
+            #    else:
+            #        raise SQLMeshError(f"Unexpected audit name '{audit_name}'.")
 
-                if audit:
-                    query = (
-                        audit.render_query(self, **t.cast(t.Dict[str, t.Any], audit_args))
-                        or audit.query
-                    )
-                    metadata.extend(
-                        [
-                            gen(query),
-                            audit.dialect,
-                            str(audit.skip),
-                            str(audit.blocking),
-                        ]
-                    )
+            #    if audit:
+            #        query = (
+            #            audit.render_query(self, **t.cast(t.Dict[str, t.Any], audit_args))
+            #            or audit.query
+            #        )
+            #        metadata.extend(
+            #            [
+            #                gen(query),
+            #                audit.dialect,
+            #                str(audit.skip),
+            #                str(audit.blocking),
+            #            ]
+            #        )
 
             for key, value in (self.virtual_properties or {}).items():
                 metadata.append(key)
@@ -983,35 +942,7 @@ class _Model(ModelMeta, frozen=True):
         return self._full_depends_on
 
 
-class _SqlBasedModel(_Model):
-    inline_audits_: t.Dict[str, t.Any] = Field(default={}, alias="inline_audits")
-
-    _expression_validator = expression_validator
-
-    @field_validator("inline_audits_", mode="before")
-    @field_validator_v1_args
-    def _inline_audits_validator(cls, v: t.Any, values: t.Dict[str, t.Any]) -> t.Any:
-        if not isinstance(v, dict):
-            return {}
-
-        from sqlmesh.core.audit import ModelAudit
-
-        inline_audits = {}
-
-        for name, audit in v.items():
-            if isinstance(audit, ModelAudit):
-                inline_audits[name] = audit
-            elif isinstance(audit, dict):
-                inline_audits[name] = ModelAudit.parse_obj(audit)
-
-        return inline_audits
-
-    @property
-    def inline_audits(self) -> t.Dict[str, ModelAudit]:
-        return self.inline_audits_
-
-
-class SqlModel(_SqlBasedModel):
+class SqlModel(_Model):
     """The model definition which relies on a SQL query to fetch the data.
 
     Args:
@@ -1243,7 +1174,7 @@ class SqlModel(_SqlBasedModel):
         return data
 
 
-class SeedModel(_SqlBasedModel):
+class SeedModel(_Model):
     """The model definition which uses a pre-built static dataset to source the data from.
 
     Args:
@@ -1557,8 +1488,8 @@ def load_sql_based_model(
     time_column_format: str = c.DEFAULT_TIME_COLUMN_FORMAT,
     macros: t.Optional[MacroRegistry] = None,
     jinja_macros: t.Optional[JinjaMacroRegistry] = None,
-    audits: t.Optional[t.Dict[str, Audit]] = None,
-    default_audits: t.List[AuditReference] = [],
+    audits: t.Optional[t.Dict[str, ModelAudit]] = None,
+    default_audits: t.Optional[t.List[AuditReference]] = None,
     python_env: t.Optional[t.Dict[str, Executable]] = None,
     dialect: t.Optional[str] = None,
     physical_schema_mapping: t.Optional[t.Dict[re.Pattern, str]] = None,
@@ -1602,7 +1533,7 @@ def load_sql_based_model(
         expressions.insert(0, meta)
 
     unrendered_signals = None
-    model_audits = None
+    model_audits = []
     for prop in meta.expressions:
         if prop.name.lower() == "signals":
             unrendered_signals = prop.args.get("value")
@@ -1673,15 +1604,30 @@ def load_sql_based_model(
     )
 
     jinja_macros = (jinja_macros or JinjaMacroRegistry()).trim(jinja_macro_references)
+
     for jinja_macro in jinja_macros.root_macros.values():
         used_variables.update(extract_macro_references_and_variables(jinja_macro.definition)[1])
+
+    audits = audits or {}
+    audit_names = {audit_name for audit_name, _ in default_audits or []}
+
+    if model_audits:
+        if isinstance(model_audits, (exp.Tuple, exp.Array)):
+            audit_names.update(extract_audit(i)[0] for i in model_audits.expressions)
+        elif isinstance(model_audits, exp.Paren):
+            audit_names.add(extract_audit(model_audits.this)[0])
+        elif isinstance(model_audits, exp.Expression):
+            audit_names.add(extract_audit(model_audits)[0])
+
+    used_audits = inline_audits
+
+    for audit_name in audit_names:
+        if audit_name in audits and audit_name not in used_audits:
+            used_audits[audit_name] = audits[audit_name]
 
     common_kwargs = dict(
         pre_statements=pre_statements,
         post_statements=post_statements,
-        audit_expressions=_extract_audit_expressions(
-            audits, inline_audits, model_audits, default_audits
-        ),
         defaults=defaults,
         path=path,
         module_path=module_path,
@@ -1693,7 +1639,7 @@ def load_sql_based_model(
         default_catalog=default_catalog,
         variables=variables,
         used_variables=used_variables,
-        inline_audits=inline_audits,
+        audit_definitions=used_audits,
         **meta_fields,
     )
 
@@ -1736,7 +1682,7 @@ def create_sql_model(
     *,
     pre_statements: t.Optional[t.List[exp.Expression]] = None,
     post_statements: t.Optional[t.List[exp.Expression]] = None,
-    audit_expressions: t.Optional[t.List[exp.Expression]] = None,
+    audit_definitions: t.Optional[t.Dict[str, ModelAudit]] = None,
     defaults: t.Optional[t.Dict[str, t.Any]] = None,
     path: Path = Path(),
     module_path: Path = Path(),
@@ -1782,11 +1728,16 @@ def create_sql_model(
 
     pre_statements = pre_statements or []
     post_statements = post_statements or []
-    audit_expressions = audit_expressions or []
+    audit_definitions = audit_definitions or {}
 
     if not python_env:
         python_env = _python_env(
-            [*pre_statements, query, *post_statements, *audit_expressions],
+            [
+                *pre_statements,
+                query,
+                *post_statements,
+                *(audit.query for audit in audit_definitions.values()),
+            ],
             jinja_macro_references,
             module_path,
             macros or macro.get_registry(),
@@ -1810,6 +1761,7 @@ def create_sql_model(
         pre_statements=pre_statements,
         post_statements=post_statements,
         physical_schema_mapping=physical_schema_mapping,
+        audit_definitions=audit_definitions,
         **kwargs,
     )
 
@@ -1821,7 +1773,7 @@ def create_seed_model(
     dialect: t.Optional[str] = None,
     pre_statements: t.Optional[t.List[exp.Expression]] = None,
     post_statements: t.Optional[t.List[exp.Expression]] = None,
-    audit_expressions: t.Optional[t.List[exp.Expression]] = None,
+    audit_definitions: t.Optional[t.Dict[str, ModelAudit]] = None,
     defaults: t.Optional[t.Dict[str, t.Any]] = None,
     path: Path = Path(),
     module_path: Path = Path(),
@@ -1866,11 +1818,15 @@ def create_seed_model(
 
     pre_statements = pre_statements or []
     post_statements = post_statements or []
-    audit_expressions = audit_expressions or []
+    audit_definitions = audit_definitions or {}
 
     if not python_env:
         python_env = _python_env(
-            [*pre_statements, *post_statements, *audit_expressions],
+            [
+                *pre_statements,
+                *post_statements,
+                *(audit.query for audit in audit_definitions.values()),
+            ],
             jinja_macro_references,
             module_path,
             macros or macro.get_registry(),
@@ -1895,6 +1851,7 @@ def create_seed_model(
         pre_statements=pre_statements,
         post_statements=post_statements,
         physical_schema_mapping=physical_schema_mapping,
+        audit_definitions=audit_definitions,
         **kwargs,
     )
 
@@ -1906,6 +1863,7 @@ def create_python_model(
     *,
     macros: t.Optional[MacroRegistry] = None,
     jinja_macros: t.Optional[JinjaMacroRegistry] = None,
+    audit_definitions: t.Optional[t.Dict[str, ModelAudit]] = None,
     defaults: t.Optional[t.Dict[str, t.Any]] = None,
     path: Path = Path(),
     module_path: Path = Path(),
@@ -1930,6 +1888,7 @@ def create_python_model(
     # Find dependencies for python models by parsing code if they are not explicitly defined
     # Also remove self-references that are found
 
+    audit_definitions = audit_definitions or {}
     pre_statements = kwargs.get("pre_statements", None) or []
     post_statements = kwargs.get("post_statements", None) or []
 
@@ -1988,6 +1947,11 @@ def create_python_model(
         entrypoint=entrypoint,
         python_env=python_env,
         jinja_macros=jinja_macros,
+        audit_definitions={
+            audit_name: audit_definitions[audit_name]
+            for audit_name, _ in (kwargs.get("audits") or [])
+            if audit_name in audit_definitions
+        },
         physical_schema_mapping=physical_schema_mapping,
         **kwargs,
     )
@@ -2337,38 +2301,6 @@ def _list_of_calls_to_exp(value: t.List[t.Tuple[str, t.Dict[str, t.Any]]]) -> ex
             for v in value
         ]
     )
-
-
-def _extract_audit_expressions(
-    audits: t.Optional[dict[str, Audit]] = None,
-    inline_audits: t.Optional[t.Mapping[str, Audit]] = None,
-    model_audits: t.Optional[t.Any] = None,
-    default_audits: t.Optional[t.List[AuditReference]] = None,
-) -> list:
-    audit_names = []
-    if model_audits:
-        if isinstance(model_audits, (exp.Tuple, exp.Array)):
-            audit_names = [extract_audit(i)[0] for i in model_audits.expressions]
-        elif isinstance(model_audits, exp.Paren):
-            audit_names = [extract_audit(model_audits.this)[0]]
-        elif isinstance(model_audits, exp.Expression):
-            audit_names = [extract_audit(model_audits)[0]]
-
-    if default_audits:
-        for audit_name, _ in default_audits:
-            audit_names.append(audit_name)
-
-    audit_expressions = []
-    if audit_names and audits:
-        for audit_name in audit_names:
-            audit = audits.get(audit_name)
-            if audit:
-                audit_expressions.append(audit.query)
-    if inline_audits:
-        for audit_name in inline_audits:
-            audit_expressions.append(inline_audits[audit_name].query)
-
-    return audit_expressions
 
 
 def _is_projection(expr: exp.Expression) -> bool:
